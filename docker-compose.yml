@@ -1,0 +1,301 @@
+version: "3.9"
+services:
+  links:
+    image: python:3.12-slim
+    container_name: links
+    restart: unless-stopped
+    ports:
+      - "8090:80"
+    environment:
+      - TZ=America/Sao_Paulo
+    volumes:
+      - /DATA/AppData/links:/app/data
+    command:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /app/data
+        cat << 'PY' > /app/app.py
+        from wsgiref.simple_server import make_server
+        import json, os, re
+        try:
+          import sqlite3
+        except ImportError:
+          sqlite3 = None
+
+        DB_PATH = "/app/data/links.db"
+        os.makedirs("/app/data", exist_ok=True)
+
+        MEM_LINKS = []
+        NEXT_ID = 1
+
+        if sqlite3 is not None:
+          try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute(
+              "CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, url TEXT NOT NULL)"
+            )
+            conn.commit()
+            cur = conn.execute("PRAGMA table_info(links)")
+            cols = [r[1] for r in cur.fetchall()]
+            if "description" not in cols:
+              conn.execute("ALTER TABLE links ADD COLUMN description TEXT DEFAULT ''")
+              conn.commit()
+            cur = conn.execute("SELECT MAX(id) FROM links")
+            row = cur.fetchone()
+            max_id = row[0] or 0
+            NEXT_ID = max_id + 1
+            conn.close()
+          except Exception:
+            sqlite3 = None
+            MEM_LINKS = []
+            NEXT_ID = 1
+
+        INDEX_HTML = '''<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+        <link rel="icon" href="https://tse1.mm.bing.net/th/id/OIP.DnOOi_2xvak8NUvmr1WZ5gHaHa?rs=1&amp;pid=ImgDetMain&amp;o=7&amp;rm=3">
+        <title>Agregador de Links</title><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+        body{font-family:system-ui,Arial,sans-serif;margin:0;padding:20px;background:#121212;color:#f5f5f5;}
+        h1{margin-top:0;color:#ffffff;}
+        .top-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
+        .top-bar a{color:#bbb;font-size:14px;text-decoration:none;}
+        .top-bar a:hover{color:#fff;text-decoration:underline;}
+        form{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;}
+        input{padding:8px;font-size:14px;flex:1 1 200px;background:#1e1e1e;color:#f5f5f5;border:1px solid #333;border-radius:4px;}
+        input::placeholder{color:#888;}
+        button{padding:8px 16px;font-size:14px;cursor:pointer;background:#4caf50;color:#fff;border:none;border-radius:4px;}
+        button:hover{background:#43a047;}
+        #msg{margin-bottom:10px;color:#ff6b6b;font-weight:500;}
+        table{width:100%;border-collapse:collapse;background:#1e1e1e;color:#f5f5f5;}
+        th,td{padding:8px;border-bottom:1px solid #333;font-size:14px;}
+        th{text-align:left;background:#272727;}
+        a.btn{display:inline-block;padding:4px 10px;background:#007acc;color:#fff;
+          text-decoration:none;border-radius:4px;font-size:13px;}
+        a.btn:hover{background:#005fa3;}
+        </style></head><body>
+        <div class="top-bar">
+        <h1><img src="https://tse1.mm.bing.net/th/id/OIP.DnOOi_2xvak8NUvmr1WZ5gHaHa?rs=1&amp;pid=ImgDetMain&amp;o=7&amp;rm=3" alt="Ícone" style="width:32px;height:32px;vertical-align:middle;margin-right:8px;border-radius:8px;">Agregador de Links</h1>
+        <a href="/config">Configurações</a>
+        </div>
+        <div id="msg"></div>
+        <form id="form">
+          <input id="title" placeholder="Título do link" required>
+          <input id="url" placeholder="URL (https://...)" required>
+          <input id="description" placeholder="Descrição" required>
+          <button type="submit">Salvar</button>
+        </form>
+        <table>
+          <thead><tr><th>ID</th><th>Título</th><th>Descrição</th><th>URL</th><th>Ação</th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <script>
+        const msg=document.getElementById("msg");
+        const tbody=document.getElementById("tbody");
+        const form=document.getElementById("form");
+        async function loadLinks(){
+          const r=await fetch("/api/links");
+          const data=await r.json();
+          tbody.innerHTML=data.map(l=>
+            "<tr><td>"+l.id+"</td><td>"+l.title+"</td><td>"+(l.description||"")+"</td><td>"+l.url+
+            "</td><td><a class='btn' target='_blank' rel='noopener' href='"+l.url+"'>Abrir</a></td></tr>"
+          ).join("");
+        }
+        form.addEventListener("submit",async e=>{
+          e.preventDefault();
+          msg.textContent="";
+          const title=document.getElementById("title").value.trim();
+          const url=document.getElementById("url").value.trim();
+          const description=document.getElementById("description").value.trim();
+          const r=await fetch("/api/links",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({title,url,description})
+          });
+          const data=await r.json();
+          if(!r.ok){
+            msg.textContent=data.error||"Erro ao salvar";
+          }else{
+            msg.style.color="#080";
+            msg.textContent="Link salvo com sucesso";
+            form.reset();
+            loadLinks();
+          }
+        });
+        loadLinks();
+        </script></body></html>'''
+
+        CONFIG_HTML = '''<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+        <title>Configuração de Links</title><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+        body{font-family:system-ui,Arial,sans-serif;margin:0;padding:20px;background:#121212;color:#f5f5f5;}
+        h1{margin-top:0;color:#ffffff;}
+        a{color:#bbb;text-decoration:none;}
+        a:hover{color:#fff;text-decoration:underline;}
+        table{width:100%;border-collapse:collapse;background:#1e1e1e;color:#f5f5f5;margin-top:16px;}
+        th,td{padding:8px;border-bottom:1px solid #333;font-size:14px;vertical-align:middle;}
+        th{text-align:left;background:#272727;}
+        input{width:100%;box-sizing:border-box;padding:6px;font-size:13px;background:#1e1e1e;color:#f5f5f5;border:1px solid #333;border-radius:4px;}
+        button{padding:6px 10px;font-size:13px;cursor:pointer;border:none;border-radius:4px;margin-right:4px;}
+        .btn-save{background:#4caf50;color:#fff;}
+        .btn-save:hover{background:#43a047;}
+        .btn-delete{background:#e53935;color:#fff;}
+        .btn-delete:hover{background:#c62828;}
+        .top-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+        #msg{margin-bottom:10px;color:#ff6b6b;font-weight:500;}
+        </style></head><body>
+        <div class="top-bar">
+        <h1>Configuração de Links</h1>
+        <a href="/">Voltar</a>
+        </div>
+        <div id="msg"></div>
+        <table>
+          <thead><tr><th>ID</th><th>Título</th><th>Descrição</th><th>URL</th><th>Ações</th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <script>
+        const msg=document.getElementById("msg");
+        const tbody=document.getElementById("tbody");
+        async function loadLinksCfg(){
+          const r=await fetch("/api/links");
+          const data=await r.json();
+          tbody.innerHTML=data.map(l=>
+            "<tr data-id='"+l.id+"'>"+
+            "<td>"+l.id+"</td>"+
+            "<td><input value=\""+(l.title||"").replace(/\"/g,"&quot;")+"\"></td>"+
+            "<td><input value=\""+(l.description||"").replace(/\"/g,"&quot;")+"\"></td>"+
+            "<td><input value=\""+(l.url||"").replace(/\"/g,"&quot;")+"\"></td>"+
+            "<td>"+
+              "<button class='btn-save' onclick='updateLink("+l.id+")'>Salvar</button>"+
+              "<button class='btn-delete' onclick='deleteLink("+l.id+")'>Remover</button>"+
+            "</td></tr>"
+          ).join("");
+        }
+        async function updateLink(id){
+          msg.textContent="";
+          const row=document.querySelector(\"tr[data-id='\"+id+\"']\");
+          if(!row)return;
+          const inputs=row.querySelectorAll("input");
+          const title=inputs[0].value.trim();
+          const description=inputs[1].value.trim();
+          const url=inputs[2].value.trim();
+          const r=await fetch("/api/links/"+id,{
+            method:"PUT",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({title,description,url})
+          });
+          const data=await r.json();
+          if(!r.ok){
+            msg.textContent=data.error||"Erro ao atualizar";
+          }else{
+            msg.style.color="#80ff80";
+            msg.textContent="Link atualizado";
+            loadLinksCfg();
+          }
+        }
+        async function deleteLink(id){
+          msg.textContent="";
+          const r=await fetch("/api/links/"+id,{method:"DELETE"});
+          const data=await r.json();
+          if(!r.ok){
+            msg.textContent=data.error||"Erro ao remover";
+          }else{
+            msg.style.color="#ff6b6b";
+            msg.textContent="Link removido";
+            loadLinksCfg();
+          }
+        }
+        loadLinksCfg();
+        </script></body></html>'''
+
+        def normalize_url(u: str) -> str:
+          u = (u or "").strip()
+          if not u:
+            return ""
+          if not re.match(r"^https?://", u, re.IGNORECASE):
+            u = "https://" + u
+          return u
+
+        def is_valid_url(u: str) -> bool:
+          return bool((u or "").strip())
+
+        def get_all_links():
+          if sqlite3 is not None:
+            conn = sqlite3.connect(DB_PATH)
+            rows = conn.execute(
+              "SELECT id, title, url FROM links ORDER BY id DESC"
+            ).fetchall()
+            conn.close()
+            return [{"id": r[0], "title": r[1], "url": r[2]} for r in rows]
+          else:
+            return list(reversed(MEM_LINKS))
+
+        def add_link(title: str, url: str):
+          global NEXT_ID
+          if sqlite3 is not None:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("INSERT INTO links (title, url) VALUES (?, ?)", (title, url))
+            conn.commit()
+            conn.close()
+          else:
+            MEM_LINKS.append({"id": NEXT_ID, "title": title, "url": url})
+          NEXT_ID += 1
+
+        def make_response(start_response, status, body, content_type="application/json"):
+          if isinstance(body, (dict, list)):
+            body = json.dumps(body, ensure_ascii=False)
+          if isinstance(body, str):
+            data = body.encode("utf-8")
+          else:
+            data = body
+          headers = [
+            ("Content-Type", content_type + "; charset=utf-8"),
+            ("Content-Length", str(len(data)))
+          ]
+          start_response(status, headers)
+          return [data]
+
+        def app(environ, start_response):
+          method = environ.get("REQUEST_METHOD", "GET").upper()
+          path = environ.get("PATH_INFO", "/")
+
+          if path == "/health":
+            return make_response(start_response, "200 OK", "OK", "text/plain")
+
+          if path == "/" and method == "GET":
+            return make_response(start_response, "200 OK", INDEX_HTML, "text/html")
+
+          if path == "/api/links" and method == "GET":
+            data = get_all_links()
+            return make_response(start_response, "200 OK", data)
+
+          if path == "/api/links" and method == "POST":
+            try:
+              length = int(environ.get("CONTENT_LENGTH") or 0)
+            except ValueError:
+              length = 0
+            raw = environ["wsgi.input"].read(length) if length > 0 else b"{}"
+            try:
+              payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+              payload = {}
+            title = (payload.get("title") or "").strip()
+            url = normalize_url(payload.get("url") or "")
+            if not title or not url:
+              return make_response(start_response, "400 Bad Request", {"error": "Título e URL são obrigatórios"})
+            if not is_valid_url(url):
+              return make_response(start_response, "400 Bad Request", {"error": "URL inválida"})
+            add_link(title, url)
+            return make_response(start_response, "200 OK", {"ok": True})
+
+          return make_response(start_response, "404 Not Found", {"error": "Não encontrado"})
+
+        if __name__ == "__main__":
+          with make_server("0.0.0.0", 80, app) as httpd:
+            httpd.serve_forever()
+        PY
+        python /app/app.py
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
